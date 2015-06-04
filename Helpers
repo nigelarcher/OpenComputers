@@ -1,0 +1,393 @@
+
+
+-- Helper functions
+
+local function termRestore()
+	local ccVersion = nil
+	ccVersion = os.version()
+
+	if ccVersion == "CraftOS 1.6" or "CraftOS 1.7" then
+		term.redirect(term.native())
+	elseif ccVersion == "CraftOS 1.5" then
+		term.restore()
+	else -- Default to older term.restore
+		printLog("Unsupported CraftOS found. Reported version is \""..ccVersion.."\".")
+		term.restore()
+	end -- if ccVersion
+end -- function termRestore()
+
+local function printLog(printStr, logLevel)
+	logLevel = logLevel or INFO
+	-- No, I'm not going to write full syslog style levels. But this makes it a little easier filtering and finding stuff in the logfile.
+	-- Since you're already looking at it, you can adjust your preferred log level right here.
+	if debugMode and (logLevel >= WARN) then
+		-- If multiple monitors, print to all of them
+		for monitorName, deviceData in pairs(monitorAssignments) do
+			if deviceData.type == "Debug" then
+				debugMonitor = monitorList[deviceData.index]
+				if(not debugMonitor) or (not debugMonitor.getSize()) then
+					term.write("printLog(): debug monitor "..monitorName.." failed")
+				else
+					term.redirect(debugMonitor) -- Redirect to selected monitor
+					debugMonitor.setTextScale(0.5) -- Fit more logs on screen
+					local color = colors.lightGray
+					if (logLevel == WARN) then
+						color = colors.white
+					elseif (logLevel == ERROR) then
+						color = colors.red
+					elseif (logLevel == FATAL) then
+						color = colors.black
+						debugMonitor.setBackgroundColor(colors.red)
+					end
+					debugMonitor.setTextColor(color)
+					write(printStr.."\n")   -- May need to use term.scroll(x) if we output too much, not sure
+					debugMonitor.setBackgroundColor(colors.black)
+					termRestore()
+				end
+			end
+		end -- for 
+
+		local logFile = fs.open("reactorcontrol.log", "a") -- See http://computercraft.info/wiki/Fs.open
+		if logFile then
+			logFile.writeLine(printStr)
+			logFile.close()
+		else
+			error("Cannot open file reactorcontrol.log for appending!")
+		end -- if logFile then
+	end -- if debugMode then
+end -- function printLog(printStr)
+
+-- Trim a string
+function stringTrim(s)
+	assert(s ~= nil, "String can't be nil")
+	return(string.gsub(s, "^%s*(.-)%s*$", "%1"))
+end
+
+-- Format number with [k,M,G,T,P,E] postfix or exponent, depending on how large it is
+local function formatReadableSIUnit(num)
+	printLog("formatReadableSIUnit("..num..")", DEBUG)
+	num = tonumber(num)
+	if(num < 1000) then return tostring(num) end
+	local sizes = {"", "k", "M", "G", "T", "P", "E"}
+	local exponent = math.floor(math.log10(num))
+	local group = math.floor(exponent / 3)
+	if group > #sizes then
+		return string.format("%e", num)
+	else
+		local divisor = math.pow(10, (group - 1) * 3)
+		return string.format("%i%s", num / divisor, sizes[group])
+	end
+end -- local function formatReadableSIUnit(num)
+
+-- pretty printLog() a table
+local function tprint (tbl, loglevel, indent)
+	if not loglevel then loglevel = DEBUG end
+	if not indent then indent = 0 end
+	for k, v in pairs(tbl) do
+		formatting = string.rep("  ", indent) .. k .. ": "
+		if type(v) == "table" then
+			printLog(formatting, loglevel)
+			tprint(v, loglevel, indent+1)
+		elseif type(v) == 'boolean' or type(v) == "function" then
+			printLog(formatting .. tostring(v), loglevel)      
+		else
+			printLog(formatting .. v, loglevel)
+		end
+	end
+end -- function tprint()
+
+config = {}
+
+-- Save a table into a config file
+-- path: path of the file to write
+-- tab: table to save
+config.save = function(path, tab)
+	printLog("Save function called for config for "..path.." EOL")
+	assert(path ~= nil, "Path can't be nil")
+	assert(type(tab) == "table", "Second parameter must be a table")
+	local f = io.open(path, "w")
+	local i = 0
+	for key, value in pairs(tab) do
+		if i ~= 0 then
+			f:write("\n")
+		end
+		f:write("["..key.."]".."\n")
+		for key2, value2 in pairs(tab[key]) do
+			key2 = stringTrim(key2)
+			--doesn't like boolean values
+			if (type(value2) ~= "boolean") then
+			value2 = stringTrim(value2)
+			else
+			value2 = tostring(value2)
+			end
+			key2 = key2:gsub(";", "\\;")
+			key2 = key2:gsub("=", "\\=")
+			value2 = value2:gsub(";", "\\;")
+			value2 = value2:gsub("=", "\\=")	
+			f:write(key2.."="..value2.."\n")
+		end
+		i = i + 1
+	end
+	f:close()
+end --config.save = function(path, tab)
+
+-- Load a config file
+-- path: path of the file to read
+config.load = function(path)
+	printLog("Load function called for config for "..path.." EOL")
+	assert(path ~= nil, "Path can't be nil")
+	local f = fs.open(path, "r")
+	if f ~= nil then
+		printLog("Successfully opened "..path.." for reading EOL")
+		local tab = {}
+		local line = ""
+		local newLine
+		local i
+		local currentTag = nil
+		local found = false
+		local pos = 0
+		while line ~= nil do
+			found = false		
+			line = line:gsub("\\;", "#_!36!_#") -- to keep \;
+			line = line:gsub("\\=", "#_!71!_#") -- to keep \=
+			if line ~= "" then
+				-- Delete comments
+				newLine = line
+				line = ""
+				for i=1, string.len(newLine) do				
+					if string.sub(newLine, i, i) ~= ";" then
+						line = line..newLine:sub(i, i)						
+					else				
+						break
+					end
+				end
+				line = stringTrim(line)
+				-- Find tag			
+				if line:sub(1, 1) == "[" and line:sub(line:len(), line:len()) == "]" then
+					currentTag = stringTrim(line:sub(2, line:len()-1))
+					tab[currentTag] = {}
+					found = true							
+				end
+				-- Find key and values
+				if not found and line ~= "" then				
+					pos = line:find("=")				
+					if pos == nil then
+						error("Bad INI file structure")
+					end
+					line = line:gsub("#_!36!_#", ";")
+					line = line:gsub("#_!71!_#", "=")
+					tab[currentTag][stringTrim(line:sub(1, pos-1))] = stringTrim(line:sub(pos+1, line:len()))
+					found = true			
+				end			
+			end
+			line = f.readLine()
+		end
+		
+		f:close()
+		
+		return tab
+	else
+		printLog("Could NOT opened "..path.." for reading! EOL")
+		return nil
+	end
+end --config.load = function(path)
+
+
+
+-- round() function from mechaet
+local function round(num, places)
+	local mult = 10^places
+	local addon = nil
+	if ((num * mult) < 0) then
+		addon = -.5
+	else
+		addon = .5
+	end
+
+	local integer, decimal = math.modf(num*mult+addon)
+	newNum = integer/mult
+	printLog("Called round(num="..num..",places="..places..") returns \""..newNum.."\".")
+	return newNum
+end -- function round(num, places)
+
+
+local function print(printParams)
+	-- Default to xPos=1, yPos=1, and first monitor
+	setmetatable(printParams,{__index={xPos=1, yPos=1, monitorIndex=1}})
+	local printString, xPos, yPos, monitorIndex =
+		printParams[1], -- Required parameter
+		printParams[2] or printParams.xPos,
+		printParams[3] or printParams.yPos,
+		printParams[4] or printParams.monitorIndex
+
+	local monitor = nil
+	monitor = monitorList[monitorIndex]
+
+	if not monitor then
+		printLog("monitor["..monitorIndex.."] in print() is NOT a valid monitor.")
+		return -- Invalid monitorIndex
+	end
+
+	monitor.setCursorPos(xPos, yPos)
+	monitor.write(printString)
+end -- function print(printParams)
+
+
+-- Replaces the one from FC_API (http://pastebin.com/A9hcbZWe) and adding multi-monitor support
+local function printCentered(printString, yPos, monitorIndex)
+	local monitor = nil
+	monitor = monitorList[monitorIndex]
+
+	if not monitor then
+		printLog("monitor["..monitorIndex.."] in printCentered() is NOT a valid monitor.", ERROR)
+		return -- Invalid monitorIndex
+	end
+
+	local width, height = monitor.getSize()
+	local monitorNameLength = 0
+
+	-- Special changes for title bar
+	if yPos == 1 then
+		-- Add monitor name to first line
+		monitorNameLength = monitorNames[monitorIndex]:len()
+		width = width - monitorNameLength -- add a space
+
+		-- Leave room for "offline" and "online" on the right except for overall status display
+		if monitorAssignments[monitorNames[monitorIndex]].type ~= "Status" then
+			width = width - 7
+		end
+	end
+
+	monitor.setCursorPos(monitorNameLength + math.ceil((1 + width - printString:len())/2), yPos)
+	monitor.write(printString)
+end -- function printCentered(printString, yPos, monitorIndex)
+
+
+-- Print text padded from the left side
+-- Clear the left side of the screen
+local function printLeft(printString, yPos, monitorIndex)
+	local monitor = nil
+	monitor = monitorList[monitorIndex]
+
+	if not monitor then
+		printLog("monitor["..monitorIndex.."] in printLeft() is NOT a valid monitor.", ERROR)
+		return -- Invalid monitorIndex
+	end
+
+	local gap = 1
+	local width = monitor.getSize()
+
+	-- Clear left-half of the monitor
+
+	for curXPos = 1, (width / 2) do
+		monitor.setCursorPos(curXPos, yPos)
+		monitor.write(" ")
+	end
+
+	-- Write our string left-aligned
+	monitor.setCursorPos(1+gap, yPos)
+	monitor.write(printString)
+end
+
+
+-- Print text padded from the right side
+-- Clear the right side of the screen
+local function printRight(printString, yPos, monitorIndex)
+	local monitor = nil
+	monitor = monitorList[monitorIndex]
+
+	if not monitor then
+		printLog("monitor["..monitorIndex.."] in printRight() is NOT a valid monitor.", ERROR)
+		return -- Invalid monitorIndex
+	end
+
+	-- Make sure printString is a string
+	printString = tostring(printString)
+
+	local gap = 1
+	local width = monitor.getSize()
+
+	-- Clear right-half of the monitor
+	for curXPos = (width/2), width do
+		monitor.setCursorPos(curXPos, yPos)
+		monitor.write(" ")
+	end
+
+	-- Write our string right-aligned
+	monitor.setCursorPos(math.floor(width) - math.ceil(printString:len()+gap), yPos)
+	monitor.write(printString)
+end
+
+
+-- Replaces the one from FC_API (http://pastebin.com/A9hcbZWe) and adding multi-monitor support
+local function clearMonitor(printString, monitorIndex)
+	local monitor = nil
+	monitor = monitorList[monitorIndex]
+
+	printLog("Called as clearMonitor(printString="..printString..",monitorIndex="..monitorIndex..").")
+
+	if not monitor then
+		printLog("monitor["..monitorIndex.."] in clearMonitor(printString="..printString..",monitorIndex="..monitorIndex..") is NOT a valid monitor.", ERROR)
+		return -- Invalid monitorIndex
+	end
+
+	local gap = 2
+	monitor.clear()
+	local width, height = monitor.getSize()
+
+	printCentered(printString, 1, monitorIndex)
+	monitor.setTextColor(colors.blue)
+	print{monitorNames[monitorIndex], 1, 1, monitorIndex}
+	monitor.setTextColor(colors.white)
+
+	for i=1, width do
+		monitor.setCursorPos(i, gap)
+		monitor.write("-")
+	end
+
+	monitor.setCursorPos(1, gap+1)
+end -- function clearMonitor(printString, monitorIndex)
+
+-- Display a solid bar of specified color
+local function drawBar(startXPos, startYPos, endXPos, endYPos, color, monitorIndex)
+	local monitor = nil
+	monitor = monitorList[monitorIndex]
+
+	if not monitor then
+		printLog("monitor["..monitorIndex.."] in drawBar() is NOT a valid monitor.")
+		return -- Invalid monitorIndex
+	end
+
+	-- PaintUtils only outputs to term., not monitor.
+	-- See http://www.computercraft.info/forums2/index.php?/topic/15540-paintutils-on-a-monitor/
+	term.redirect(monitor)
+	paintutils.drawLine(startXPos, startYPos, endXPos, endYPos, color)
+	monitor.setBackgroundColor(colors.black) -- PaintUtils doesn't restore the color
+	termRestore()
+end -- function drawBar(startXPos, startYPos,endXPos,endYPos,color,monitorIndex)
+
+
+-- Display single pixel color
+local function drawPixel(xPos, yPos, color, monitorIndex)
+	local monitor = nil
+	monitor = monitorList[monitorIndex]
+
+	if not monitor then
+		printLog("monitor["..monitorIndex.."] in drawPixel() is NOT a valid monitor.")
+		return -- Invalid monitorIndex
+	end
+
+	-- PaintUtils only outputs to term., not monitor.
+	-- See http://www.computercraft.info/forums2/index.php?/topic/15540-paintutils-on-a-monitor/
+	term.redirect(monitor)
+	paintutils.drawPixel(xPos, yPos, color)
+	monitor.setBackgroundColor(colors.black) -- PaintUtils doesn't restore the color
+	termRestore()
+end -- function drawPixel(xPos, yPos, color, monitorIndex)
+
+
+-- Replacement for sleep, I want to make this event driven
+local function wait(time)
+	sleep(time)
+end
+
