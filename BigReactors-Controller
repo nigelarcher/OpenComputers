@@ -1,0 +1,81 @@
+-- Will provide control over my reactors. Current running with Infitech 2, and therefore only Active Cooled will be covered
+
+-- Load dependencies
+local component = require("component")
+local term = require("term")
+local sides = require("sides")
+require("helpers")
+local redstone = component.redstone
+local reactor = component.br_reactor
+
+
+-- Some global variables
+local progVer = "0.3.18"
+local progName = "SELECTFEW-ReactorNoBlow"
+local sideClick, xClick, yClick = nil, 0, 0
+local loopTime = 2
+local controlRodAdjustAmount = 1 -- Default Reactor Rod Control % adjustment amount
+local flowRateAdjustAmount = 25 -- Default Turbine Flow Rate in mB adjustment amount
+local debugMode = false
+
+-- End multi-reactor cleanup section
+local minStoredEnergyPercent = nil -- Max energy % to store before activate
+local maxStoredEnergyPercent = nil -- Max energy % to store before shutdown
+local monitorList = {} -- Empty monitor array
+local monitorNames = {} -- Empty array of monitor names
+local reactorList = {} -- Empty reactor array
+local reactorNames = {} -- Empty array of reactor names
+local turbineList = {} -- Empty turbine array
+local turbineNames = {} -- Empty array of turbine names
+local monitorAssignments = {} -- Empty array of monitor - "what to display" assignments
+local monitorOptionFileName = "monitors.options" -- File for saving the monitor assignments
+local knowlinglyOverride = false -- Issue #39 Allow the user to override safe values, currently only enabled for actively cooled reactor min/max temperature
+local steamRequested = 0 -- Sum of Turbine Flow Rate in mB
+local steamDelivered = 0 -- Sum of Active Reactor steam output in mB
+
+-- Log levels
+local FATAL = 16
+local ERROR = 8
+local WARN = 4
+local INFO = 2
+local DEBUG = 1
+
+function roundFuel(amount)
+    return math.floor(amount * 1000) / 1000
+end
+
+function displayStatus()
+
+end
+
+
+
+
+
+while true do
+    term.clear()
+    if reactor.getConnected() then
+        local steam = reactor.getHotFluidAmount()
+        local steamMax = reactor.getHotFluidAmountMax()
+        local coolant = reactor.getCoolantAmount()
+        local coolantMax = reactor.getCoolantAmountMax()
+        
+        local steamProduction = reactor.getHotFluidProduced()
+        
+        
+        if redstone.getInput(sides.top) == 0 then -- system has sufficient steam, set control rods
+            reactor.setAllControlRodLevels(95)
+        else -- system is running out of or has no steam remaining
+            reactor.setAllControlRodLevels(0)
+            reactor.setActive(true)
+        end
+        print("Reactor is online")
+        print("Producing " .. reactor.getHotFluidProducedLastTick() .. "mB/t of Steam")
+        print("Using " .. roundFuel(reactor.getFuelConsumedLastTick()) .. "mB/t of Yellorium")
+        print("Control rods set to " .. reactor.getControlRodLevel(0) .. "%")
+    else
+        print("Reactor is not connected. \nCheck for issues in chunk loading.")
+    end
+    
+    os.sleep(5)
+end
